@@ -1,0 +1,22 @@
+[package]
+name = "neat-adblock"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "C ABI around adblock-rust for NEAT Browser (WinUI 3 + WebView2)."
+
+[lib]
+name = "neat_adblock"
+crate-type = ["cdylib"]
+
+[dependencies]
+# `single-thread` is deliberately disabled: the engine must be Send + Sync so it can be built on
+# a background thread and swapped in, and queried from whichever thread WebView2 raises events on.
+adblock = { version = "=0.13.3", default-features = false, features = ["embedded-domain-resolver", "full-regex-handling"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
