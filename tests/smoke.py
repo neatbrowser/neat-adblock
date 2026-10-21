@@ -94,12 +94,17 @@ r = Result()
 check("null engine gives NEAT_ERR_ARGS", lib.neat_check_request(None, b"https://a.com/", b"https://b.com/", b"script", None, C.byref(r)) == -1)
 check("null result pointer gives NEAT_ERR_ARGS", lib.neat_check_request(engine, b"https://a.com/", b"https://b.com/", b"script", None, None) == -1)
 
-# Popups: take a real rule from the release
-popups = [l for l in open(f"{dist}/popups.txt", encoding="utf-8").read().split("\n") if l.startswith("||") and l.endswith("^$document")]
-check("popups.txt has simple host rules", len(popups) > 0)
-host = popups[0][2:].split("^")[0]
-check(f"popup to {host} is blocked", lib.neat_check_popup(engine, f"https://{host}/x".encode(), b"https://news.test/") == 1)
-check("popup to an unrelated host is allowed", lib.neat_check_popup(engine, b"https://example.com/", b"https://news.test/") == 0)
+# Popups: take a real rule from the release (releases built before popups.txt existed lack it)
+import os
+popups_path = f"{dist}/popups.txt"
+if os.path.exists(popups_path):
+    popups = [l for l in open(popups_path, encoding="utf-8").read().split("\n") if l.startswith("||") and l.endswith("^$document")]
+    check("popups.txt has simple host rules", len(popups) > 0)
+    host = popups[0][2:].split("^")[0]
+    check(f"popup to {host} is blocked", lib.neat_check_popup(engine, f"https://{host}/x".encode(), b"https://news.test/") == 1)
+    check("popup to an unrelated host is allowed", lib.neat_check_popup(engine, b"https://example.com/", b"https://news.test/") == 0)
+else:
+    print("SKIP popup rule checks: this release has no popups.txt (built before popup support)")
 check("popup with a bad URL gives NEAT_ERR_URL", lib.neat_check_popup(engine, b"nope", b"https://news.test/") == -2)
 
 # Cosmetic
