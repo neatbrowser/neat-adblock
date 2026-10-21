@@ -1,0 +1,42 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-pc-windows-msvc, aarch64-pc-windows-msvc]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+      - name: Unit tests (host target only)
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        run: cargo test --release --locked
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: neat_adblock-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/neat_adblock.dll
+
+  linux-smoke:
+    # Exercises the C ABI against a real neat-filters release through ctypes.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build --release --locked
+      - name: Download the latest neat-filters release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FILTERS_REPO: neatbrowser/neat-filters   # change to the real owner/repo
+        run: |
+          mkdir -p dist
+          gh release download --repo "$FILTERS_REPO" --dir dist
+      - run: python3 -I tests/smoke.py target/release/libneat_adblock.so dist
