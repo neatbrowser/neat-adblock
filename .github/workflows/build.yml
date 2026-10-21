@@ -38,5 +38,12 @@ jobs:
           FILTERS_REPO: neatbrowser/neat-filters   # change to the real owner/repo
         run: |
           mkdir -p dist
-          gh release download --repo "$FILTERS_REPO" --dir dist
-      - run: python3 -I tests/smoke.py target/release/libneat_adblock.so dist
+          # `gh release download` without a tag needs --pattern (or --archive).
+          if gh release download --repo "$FILTERS_REPO" --pattern '*' --dir dist; then
+            echo "have_release=true" >> "$GITHUB_ENV"
+          else
+            echo "::warning::No neat-filters release available yet; skipping the smoke test."
+          fi
+      - name: Smoke test
+        if: env.have_release == 'true'
+        run: python3 -I tests/smoke.py target/release/libneat_adblock.so dist
