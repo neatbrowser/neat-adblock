@@ -52,4 +52,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
-          gh release create "$env:TAG" out/* --title "neat_adblock $env:TAG" --generate-notes --latest
+          # The release may already exist (made by hand on the website, which also starts this
+          # workflow). Then the files are added to it; otherwise it is created.
+          gh release view "$env:TAG" *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload "$env:TAG" (Get-ChildItem out).FullName --clobber
+          } else {
+            gh release create "$env:TAG" (Get-ChildItem out).FullName --title "neat_adblock $env:TAG" --generate-notes --latest
+          }
+          if ($LASTEXITCODE -ne 0) { throw "publishing the release failed" }
