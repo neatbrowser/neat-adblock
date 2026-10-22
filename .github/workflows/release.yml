@@ -1,0 +1,55 @@
+name: release
+
+# Publishes neat_adblock.dll as a release asset, for NEAT's build to download
+# (tools/fetch-ads.ps1 in the NEAT repository). Run it by pushing a tag like v0.1.0, or by hand
+# from the Actions tab with a tag name. The tag is created for you in the second case.
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, for example v0.1.0"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add Rust targets
+        run: rustup target add x86_64-pc-windows-msvc aarch64-pc-windows-msvc
+
+      - name: Test
+        run: cargo test --release --locked
+
+      - name: Build x64
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc
+
+      - name: Build arm64
+        run: cargo build --release --locked --target aarch64-pc-windows-msvc
+
+      - name: Collect the files and their hashes
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/neat_adblock.dll out/neat_adblock.dll
+          Copy-Item target/aarch64-pc-windows-msvc/release/neat_adblock.dll out/neat_adblock-arm64.dll
+          foreach ($f in 'neat_adblock.dll', 'neat_adblock-arm64.dll') {
+            $h = (Get-FileHash "out/$f" -Algorithm SHA256).Hash.ToLower()
+            # "hash  name", the format sha256sum prints
+            "$h  $f" | Out-File -Encoding ascii -NoNewline "out/$f.sha256"
+          }
+          Get-ChildItem out | Format-Table Name, Length
+
+      - name: Publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          gh release create "$env:TAG" out/* --title "neat_adblock $env:TAG" --generate-notes --latest
