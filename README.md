@@ -89,8 +89,3 @@ python3 -I tests/smoke.py target/release/libneat_adblock.so ../neat-filters/dist
 
 Not covered by adblock-rust or this library: `$replace`, HTML filters (`##^`), `$urlskip`,
 `$ipaddress`, `$cname`. See neat-filters' README for the measured list.
-
-## License
-
-The Rust code here links adblock-rust (MPL-2.0). Pick a license for this repository yourself;
-none is set.
