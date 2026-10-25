@@ -1,0 +1,6 @@
+{
+  "name": "neat-filters-parity",
+  "private": true,
+  "type": "module",
+  "dependencies": { "@gorhill/ubo-core": "0.1.30" }
+}
