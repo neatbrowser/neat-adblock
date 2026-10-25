@@ -12,7 +12,7 @@ crate-type = ["cdylib"]
 [dependencies]
 # `single-thread` is deliberately disabled: the engine must be Send + Sync so it can be built on
 # a background thread and swapped in, and queried from whichever thread WebView2 raises events on.
-adblock = { version = "=0.13.3", default-features = false, features = ["embedded-domain-resolver", "full-regex-handling"] }
+adblock = { version = "=0.13.3", default-features = false, features = ["embedded-domain-resolver", "full-regex-handling", "css-validation"] }
 serde_json = "1"
 
 [profile.release]
