@@ -1,0 +1,138 @@
+name: update
+
+on:
+  schedule:
+    # Every 6 hours, off the top of the hour (GitHub delays jobs queued at :00).
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Publish a release even if nothing changed"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Cache Rust build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            tools/nf-tool/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('tools/nf-tool/Cargo.lock') }}
+
+      - name: Unit tests
+        run: node --test scripts/*.test.mjs
+
+      # The whole previous release, not only its manifest: a list whose source is down keeps its
+      # previous copy (see buildLists in scripts/build.mjs).
+      - name: Fetch previous release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p prev
+          gh release download --pattern '*' --dir prev || echo "No previous release (first run)"
+
+      - name: Build
+        id: build
+        run: node scripts/build.mjs --prev prev/manifest.json ${{ inputs.force && '--force' || '' }}
+
+      # Informational: runs the hosts in bench/hosts.txt through the real engine and reports which
+      # are not fully stopped, and by which rule and list. It never blocks a release.
+      - name: Host benchmark
+        if: steps.build.outputs.changed == 'true'
+        continue-on-error: true
+        run: |
+          tools/nf-tool/target/release/nf-tool bench dist bench/hosts.txt > bench-report.json
+          {
+            echo "### Host benchmark"
+            jq -r '"\(.full) of \(.total) hosts fully stopped (\(.fullPercent * 10 | floor / 10)%), \(.partial) partly, \(.pingOnly) only as ping, \(.none) not at all."' bench-report.json
+            echo
+            echo "| Host | Verdict | Rule | Lists |"
+            echo "| --- | --- | --- | --- |"
+            jq -r '.hosts[] | select(.verdict != "full") | "| `\(.item)` | \(.verdict) | `\((.rule // "-")[0:60] | gsub("\\|"; "/"))` | \(.lists | join(", ")) |"' bench-report.json
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Informational: the same lists and requests through adblock-rust and through uBlock Origin's
+      # own engine; the requests they judge differently point at rules NEAT's engine misreads.
+      - name: Engine parity with uBlock Origin
+        if: steps.build.outputs.changed == 'true'
+        continue-on-error: true
+        working-directory: parity
+        run: |
+          npm ci --silent
+          node gen-corpus.mjs ../dist corpus.jsonl --rules 12000
+          ../tools/nf-tool/target/release/nf-tool verdicts ../dist corpus.jsonl > rust.jsonl
+          node run-ubo.mjs ../dist corpus.jsonl > ubo.jsonl
+          node compare.mjs corpus.jsonl rust.jsonl ubo.jsonl > ../parity-report.json
+          {
+            echo "### Engine parity with uBlock Origin"
+            jq -r '"\(.agreePercent)% of \(.total) requests judged alike; only NEAT stops \(.onlyRustStops), only uBO stops \(.onlyUboStops)."' ../parity-report.json
+            echo
+            echo "| Who stops | Rule | Count | Example |"
+            echo "| --- | --- | --- | --- |"
+            jq -r '(.onlyUboStopsByRule[0:15][] | "| only uBO | `\(.rule[0:70] | gsub("\\|"; "/"))` | \(.count) | `\(.url[0:60])` |"), (.onlyRustStopsByRule[0:15][] | "| only NEAT | `\(.rule[0:70] | gsub("\\|"; "/"))` | \(.count) | `\(.url[0:60])` |")' ../parity-report.json
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload benchmark report
+        if: steps.build.outputs.changed == 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-report
+          path: |
+            bench-report.json
+            parity-report.json
+
+      - name: Publish release
+        if: steps.build.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.build.outputs.version }}
+        run: |
+          # Create as a draft, upload everything, then publish, so clients that poll
+          # releases/latest never see a release with missing files.
+          gh release create "v$VERSION" \
+            dist/manifest.json dist/resources.json dist/*.txt \
+            --draft --title "neat-filters $VERSION" --notes-file .cache/release-notes.md
+          gh release edit "v$VERSION" --draft=false --latest
+
+      - name: Prune old releases (keep the newest 30)
+        if: steps.build.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release list --limit 200 --json tagName,isDraft \
+            --jq '[.[] | select(.isDraft | not)] | .[30:] | .[].tagName' |
+          while read -r tag; do
+            gh release delete "$tag" --cleanup-tag --yes
+          done
+
+      - name: Keepalive
+        # GitHub disables scheduled workflows in repos with no activity for 60 days.
+        run: |
+          last=$(git log -1 --format=%ct)
+          now=$(date +%s)
+          if [ $((now - last)) -gt $((45 * 86400)) ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit --allow-empty -m "chore: keepalive"
+            git push
+          fi
