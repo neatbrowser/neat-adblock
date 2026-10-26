@@ -5,6 +5,7 @@ usage: python3 tests/smoke.py <path to libneat_adblock.so|neat_adblock.dll> <nea
 """
 import ctypes as C
 import json
+import os
 import sys
 import threading
 import time
@@ -28,6 +29,8 @@ lib.neat_check_request.argtypes = [P, C.c_char_p, C.c_char_p, C.c_char_p, C.c_ch
 lib.neat_check_result_free.argtypes = [C.POINTER(Result)]
 lib.neat_check_popup.restype = C.c_int32
 lib.neat_check_popup.argtypes = [P, C.c_char_p, C.c_char_p]
+lib.neat_check_document.restype = C.c_int32
+lib.neat_check_document.argtypes = [P, C.c_char_p]
 lib.neat_get_csp.restype = C.c_int32
 lib.neat_get_csp.argtypes = [P, C.c_char_p, C.c_char_p, C.c_char_p, C.POINTER(P)]
 lib.neat_cosmetic_resources.restype = C.c_int32
@@ -93,6 +96,19 @@ check("bad URL gives NEAT_ERR_URL", rc == -2)
 r = Result()
 check("null engine gives NEAT_ERR_ARGS", lib.neat_check_request(None, b"https://a.com/", b"https://b.com/", b"script", None, C.byref(r)) == -1)
 check("null result pointer gives NEAT_ERR_ARGS", lib.neat_check_request(engine, b"https://a.com/", b"https://b.com/", b"script", None, None) == -1)
+
+# Page rules: a `$document` rule stops a navigation, a plain host rule does not.
+docs_path = f"{dist}/documents.txt"
+if os.path.exists(docs_path):
+    docs = [l for l in open(docs_path, encoding="utf-8").read().split("\n") if l.startswith("||") and l.endswith("^$document")]
+    check("documents.txt has simple $document rules", len(docs) > 0)
+    host = docs[0][2:].split("^")[0]
+    check(f"navigation to {host} is blocked", lib.neat_check_document(engine, f"https://{host}/".encode()) == 1)
+    check("navigation to doubleclick.net is not blocked (a plain rule is not a page rule)",
+          lib.neat_check_document(engine, b"https://ad.doubleclick.net/") == 0)
+    check("navigation to an unrelated host is allowed", lib.neat_check_document(engine, b"https://example.com/") == 0)
+    check("navigation with a bad URL gives NEAT_ERR_URL", lib.neat_check_document(engine, b"not a url") == -2)
+check("neat_check_document with NULL engine gives NEAT_ERR_ARGS", lib.neat_check_document(None, b"https://example.com/") == -1)
 
 # Popups: take a real rule from the release (releases built before popups.txt existed lack it)
 import os

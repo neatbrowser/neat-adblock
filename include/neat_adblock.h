@@ -55,6 +55,9 @@ void    neat_check_result_free(NeatCheckResult* result);
 /* For NewWindowRequested: 1 = block the new window, 0 = allow, negative = error. */
 int32_t neat_check_popup(const NeatEngine* engine, const char* target_url, const char* opener_url);
 
+/* Top-level navigation: 1 = the page itself is blocked ($document / $all rules only), 0 = allow, negative = error. */
+int32_t neat_check_document(const NeatEngine* engine, const char* url);
+
 /* Extra CSP directives for a document/subdocument response. 1 = csp_out set, 0 = none. */
 int32_t neat_get_csp(const NeatEngine* engine, const char* url, const char* source_url,
                      const char* request_type, char** csp_out);

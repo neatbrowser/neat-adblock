@@ -59,6 +59,11 @@ internal static class Native
         [MarshalAs(UnmanagedType.LPUTF8Str)] string openerUrl);
 
     [DllImport(Lib)]
+    public static extern int neat_check_document(
+        IntPtr engine,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string url);
+
+    [DllImport(Lib)]
     public static extern int neat_get_csp(
         IntPtr engine,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string url,
@@ -144,6 +149,10 @@ public sealed class AdblockEngine : IDisposable
     /// <summary>For CoreWebView2.NewWindowRequested. True = cancel the new window.</summary>
     public bool ShouldBlockPopup(string targetUrl, string openerUrl) =>
         With(h => Native.neat_check_popup(h, targetUrl, openerUrl)) == 1;
+
+    /// <summary>For a top-level navigation. True = the page itself is blocked ($document / $all rules only).</summary>
+    public bool ShouldBlockDocument(string url) =>
+        With(h => Native.neat_check_document(h, url)) == 1;
 
     /// <summary>Extra CSP directives to append to a document/subdocument response, or null.</summary>
     public string? GetCsp(string url, string sourceUrl, string requestType)

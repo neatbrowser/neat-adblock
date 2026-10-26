@@ -38,6 +38,8 @@ const TRUSTED: PermissionMask = PermissionMask::from_bits(1);
 pub struct NeatEngine {
     network: Engine,
     popup: Engine,
+    /// Rules for a navigation to a page itself (`$document`, `$all`), see neat-filters' documents.txt.
+    document: Engine,
 }
 
 #[repr(C)]
@@ -90,6 +92,7 @@ fn load_engines(dir: &Path) -> Result<NeatEngine, String> {
 
     let mut network_set = FilterSet::new(false);
     let mut popup_set = FilterSet::new(false);
+    let mut document_set = FilterSet::new(false);
     let mut resources: Vec<Resource> = Vec::new();
 
     for f in files {
@@ -98,12 +101,17 @@ fn load_engines(dir: &Path) -> Result<NeatEngine, String> {
         match f["kind"].as_str() {
             Some("list") => {
                 let text = std::fs::read_to_string(&path).map_err(|e| format!("{name}: {e}"))?;
-                let popup = f["role"] == "popup";
+                let role = f["role"].as_str().unwrap_or("network");
                 let opts = ParseOptions {
                     permissions: if f["trusted"] == true { TRUSTED } else { PermissionMask::default() },
                     ..Default::default()
                 };
-                if popup { &mut popup_set } else { &mut network_set }.add_filter_list(text, opts);
+                match role {
+                    "popup" => &mut popup_set,
+                    "document" => &mut document_set,
+                    _ => &mut network_set,
+                }
+                .add_filter_list(text, opts);
             }
             Some("resources") => {
                 let text = std::fs::read_to_string(&path).map_err(|e| format!("{name}: {e}"))?;
@@ -118,7 +126,8 @@ fn load_engines(dir: &Path) -> Result<NeatEngine, String> {
     let mut network = Engine::new_with_filter_set(network_set);
     network.use_resources(resources);
     let popup = Engine::new_with_filter_set(popup_set);
-    Ok(NeatEngine { network, popup })
+    let document = Engine::new_with_filter_set(document_set);
+    Ok(NeatEngine { network, popup, document })
 }
 
 // ---------------------------------------------------------------- exported API
@@ -239,6 +248,21 @@ pub unsafe extern "C" fn neat_check_popup(
     guard(NEAT_ERR_INTERNAL, || {
         let Ok(request) = Request::new(target, opener, "document", "get") else { return NEAT_ERR_URL };
         engine.popup.check_network_request(&request).should_block() as i32
+    })
+}
+
+/// Page check for a top-level navigation: 1 = the page itself is blocked (a `$document` or `$all`
+/// rule matched and no exception did), 0 = allow, negative = error. A plain rule such as
+/// `||ads.example^` does not block a navigation, as in uBlock Origin. An older release without
+/// `documents.txt` always answers 0.
+#[no_mangle]
+pub unsafe extern "C" fn neat_check_document(engine: *const NeatEngine, url: *const c_char) -> i32 {
+    let (Some(engine), Some(url)) = (engine.as_ref(), str_arg(url)) else {
+        return NEAT_ERR_ARGS;
+    };
+    guard(NEAT_ERR_INTERNAL, || {
+        let Ok(request) = Request::new(url, url, "document", "get") else { return NEAT_ERR_URL };
+        engine.document.check_network_request(&request).should_block() as i32
     })
 }
 
