@@ -55,6 +55,13 @@ void    neat_check_result_free(NeatCheckResult* result);
 /* For NewWindowRequested: 1 = block the new window, 0 = allow, negative = error. */
 int32_t neat_check_popup(const NeatEngine* engine, const char* target_url, const char* opener_url);
 
+/* Like neat_engine_create, but uses the engine cache at cache_path when it was written for the same key by this
+ * library; otherwise builds from the lists. *from_cache_out (may be NULL) = 1 when the cache was used. */
+NeatEngine* neat_engine_load(const char* dir, const char* cache_path, const char* key, int32_t* from_cache_out, char** error_out);
+
+/* Writes the engine cache for key to path (atomic replace). 0 = ok, negative = error (error_out may be NULL). */
+int32_t neat_engine_save(const NeatEngine* engine, const char* path, const char* key, char** error_out);
+
 /* Top-level navigation: 1 = the page itself is blocked ($document / $all rules only), 0 = allow, negative = error. */
 int32_t neat_check_document(const NeatEngine* engine, const char* url);
 

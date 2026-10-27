@@ -86,6 +86,21 @@ fn read_json(path: &Path) -> Result<Value, String> {
     serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
 }
 
+fn load_resources(dir: &Path, manifest: &Value) -> Result<Vec<Resource>, String> {
+    let files = manifest["files"].as_array().ok_or("manifest.json: no files array")?;
+    let mut resources: Vec<Resource> = Vec::new();
+    for f in files {
+        if f["kind"].as_str() != Some("resources") {
+            continue;
+        }
+        let name = f["name"].as_str().ok_or("manifest.json: file without name")?;
+        let text = std::fs::read_to_string(dir.join(name)).map_err(|e| format!("{name}: {e}"))?;
+        let mut r: Vec<Resource> = serde_json::from_str(&text).map_err(|e| format!("{name}: {e}"))?;
+        resources.append(&mut r);
+    }
+    Ok(resources)
+}
+
 fn load_engines(dir: &Path) -> Result<NeatEngine, String> {
     let manifest = read_json(&dir.join("manifest.json"))?;
     let files = manifest["files"].as_array().ok_or("manifest.json: no files array")?;
@@ -93,40 +108,117 @@ fn load_engines(dir: &Path) -> Result<NeatEngine, String> {
     let mut network_set = FilterSet::new(false);
     let mut popup_set = FilterSet::new(false);
     let mut document_set = FilterSet::new(false);
-    let mut resources: Vec<Resource> = Vec::new();
 
     for f in files {
         let name = f["name"].as_str().ok_or("manifest.json: file without name")?;
-        let path = dir.join(name);
-        match f["kind"].as_str() {
-            Some("list") => {
-                let text = std::fs::read_to_string(&path).map_err(|e| format!("{name}: {e}"))?;
-                let role = f["role"].as_str().unwrap_or("network");
-                let opts = ParseOptions {
-                    permissions: if f["trusted"] == true { TRUSTED } else { PermissionMask::default() },
-                    ..Default::default()
-                };
-                match role {
-                    "popup" => &mut popup_set,
-                    "document" => &mut document_set,
-                    _ => &mut network_set,
-                }
-                .add_filter_list(text, opts);
-            }
-            Some("resources") => {
-                let text = std::fs::read_to_string(&path).map_err(|e| format!("{name}: {e}"))?;
-                let mut r: Vec<Resource> =
-                    serde_json::from_str(&text).map_err(|e| format!("{name}: {e}"))?;
-                resources.append(&mut r);
-            }
-            _ => {} // unknown kinds are ignored so newer manifests keep working
+        if f["kind"].as_str() != Some("list") {
+            continue; // resources are read below; unknown kinds are ignored so newer manifests keep working
         }
+        let text = std::fs::read_to_string(dir.join(name)).map_err(|e| format!("{name}: {e}"))?;
+        let role = f["role"].as_str().unwrap_or("network");
+        let opts = ParseOptions {
+            permissions: if f["trusted"] == true { TRUSTED } else { PermissionMask::default() },
+            ..Default::default()
+        };
+        match role {
+            "popup" => &mut popup_set,
+            "document" => &mut document_set,
+            _ => &mut network_set,
+        }
+        .add_filter_list(text, opts);
     }
 
     let mut network = Engine::new_with_filter_set(network_set);
-    network.use_resources(resources);
+    network.use_resources(load_resources(dir, &manifest)?);
     let popup = Engine::new_with_filter_set(popup_set);
     let document = Engine::new_with_filter_set(document_set);
+    Ok(NeatEngine { network, popup, document })
+}
+
+// ---------------------------------------------------------------- engine cache
+//
+// Parsing the lists takes seconds; loading what the engines serialized takes a fraction of that.
+// The cache file holds the three engines' own serialized form (adblock-rust checks its version
+// and a checksum when reading it) behind a key the caller chooses, e.g. a hash of the release's
+// manifest. A cache is only used when the key matches and this library is the build that wrote it.
+// Resources (scriptlets) are not part of the serialized engine and are read from the release folder.
+
+const CACHE_MAGIC: &[u8; 8] = b"NEATENG\0";
+const CACHE_FORMAT: u32 = 1;
+const BUILD_ID: &str = concat!("adblock-rust 0.13.3 / neat-adblock ", env!("CARGO_PKG_VERSION"));
+
+fn full_key(user: &str) -> String {
+    format!("{user}|{BUILD_ID}")
+}
+
+fn save_cache(engine: &NeatEngine, path: &Path, key: &str) -> Result<(), String> {
+    let key = full_key(key);
+    let blobs = [engine.network.serialize(), engine.popup.serialize(), engine.document.serialize()];
+
+    let mut buf: Vec<u8> = Vec::with_capacity(blobs.iter().map(Vec::len).sum::<usize>() + key.len() + 64);
+    buf.extend_from_slice(CACHE_MAGIC);
+    buf.extend_from_slice(&CACHE_FORMAT.to_le_bytes());
+    buf.extend_from_slice(&(key.len() as u32).to_le_bytes());
+    buf.extend_from_slice(key.as_bytes());
+    for b in &blobs {
+        buf.extend_from_slice(&(b.len() as u64).to_le_bytes());
+        buf.extend_from_slice(b);
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    // Written beside the target and renamed over it, so a reader never sees half a file.
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, &buf).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("{}: {e}", path.display())
+    })
+}
+
+fn take<'a>(data: &mut &'a [u8], n: usize) -> Result<&'a [u8], String> {
+    if data.len() < n {
+        return Err("cache file is cut short".into());
+    }
+    let (head, rest) = data.split_at(n);
+    *data = rest;
+    Ok(head)
+}
+
+fn load_cache(dir: &Path, path: &Path, key: &str) -> Result<NeatEngine, String> {
+    let key = full_key(key);
+    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut data: &[u8] = &bytes;
+
+    if take(&mut data, 8)? != CACHE_MAGIC {
+        return Err("not an engine cache".into());
+    }
+    if u32::from_le_bytes(take(&mut data, 4)?.try_into().unwrap()) != CACHE_FORMAT {
+        return Err("engine cache format differs".into());
+    }
+    let key_len = u32::from_le_bytes(take(&mut data, 4)?.try_into().unwrap()) as usize;
+    if take(&mut data, key_len)? != key.as_bytes() {
+        return Err("engine cache is for another release or library".into());
+    }
+
+    let mut engines = Vec::with_capacity(3);
+    for _ in 0..3 {
+        let len = u64::from_le_bytes(take(&mut data, 8)?.try_into().unwrap());
+        let len = usize::try_from(len).map_err(|_| "cache blob too large")?;
+        let blob = take(&mut data, len)?;
+        let mut e = Engine::default();
+        e.deserialize(blob).map_err(|e| format!("engine cache: {e}"))?;
+        engines.push(e);
+    }
+
+    let manifest = read_json(&dir.join("manifest.json"))?;
+    let mut document = engines.pop().unwrap();
+    let mut popup = engines.pop().unwrap();
+    let mut network = engines.pop().unwrap();
+    network.use_resources(load_resources(dir, &manifest)?);
+    // Never used for resources, but keeps all three engines in the same state as a fresh build.
+    let _ = (&mut popup, &mut document);
     Ok(NeatEngine { network, popup, document })
 }
 
@@ -159,6 +251,72 @@ pub unsafe extern "C" fn neat_engine_create(dir: *const c_char, error_out: *mut 
             write_out(error_out, "internal error while building the engine".into());
             ptr::null_mut()
         }
+    }
+}
+
+/// Like `neat_engine_create`, but first tries the engine cache at `cache_path` (see above), which
+/// is used only when it was written for the same `key` by this library. Anything wrong with the
+/// cache means the engines are built from the lists instead, so a result is NULL only when the
+/// lists cannot be read either. `from_cache_out` (may be NULL) is set to 1 when the cache was used.
+#[no_mangle]
+pub unsafe extern "C" fn neat_engine_load(
+    dir: *const c_char,
+    cache_path: *const c_char,
+    key: *const c_char,
+    from_cache_out: *mut i32,
+    error_out: *mut *mut c_char,
+) -> *mut NeatEngine {
+    clear_out(error_out);
+    if !from_cache_out.is_null() {
+        *from_cache_out = 0;
+    }
+    let (Some(dir), Some(cache), Some(key)) = (str_arg(dir), str_arg(cache_path), str_arg(key)) else {
+        write_out(error_out, "invalid argument".into());
+        return ptr::null_mut();
+    };
+
+    let cached = catch_unwind(AssertUnwindSafe(|| load_cache(Path::new(dir), Path::new(cache), key)));
+    if let Ok(Ok(engine)) = cached {
+        if !from_cache_out.is_null() {
+            *from_cache_out = 1;
+        }
+        return Box::into_raw(Box::new(engine));
+    }
+
+    match catch_unwind(AssertUnwindSafe(|| load_engines(Path::new(dir)))) {
+        Ok(Ok(engine)) => Box::into_raw(Box::new(engine)),
+        Ok(Err(e)) => {
+            write_out(error_out, e);
+            ptr::null_mut()
+        }
+        Err(_) => {
+            write_out(error_out, "internal error while building the engine".into());
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Writes the engine cache for `key` to `path` (replacing a file there). 0 = written, negative =
+/// error; `error_out` (may be NULL) then holds a message. Takes a moment and a few tens of MB of
+/// memory: call it off the UI thread, after the engine is in use.
+#[no_mangle]
+pub unsafe extern "C" fn neat_engine_save(
+    engine: *const NeatEngine,
+    path: *const c_char,
+    key: *const c_char,
+    error_out: *mut *mut c_char,
+) -> i32 {
+    clear_out(error_out);
+    let (Some(engine), Some(path), Some(key)) = (engine.as_ref(), str_arg(path), str_arg(key)) else {
+        return NEAT_ERR_ARGS;
+    };
+    match catch_unwind(AssertUnwindSafe(|| save_cache(engine, Path::new(path), key))) {
+        Ok(Ok(())) => NEAT_OK,
+        Ok(Err(e)) => {
+            write_out(error_out, e);
+            NEAT_ERR_ARGS
+        }
+        Err(_) => NEAT_ERR_INTERNAL,
     }
 }
 

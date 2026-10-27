@@ -1,6 +1,6 @@
 [package]
 name = "neat-adblock"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 publish = false
 description = "C ABI around adblock-rust for NEAT Browser (WinUI 3 + WebView2)."

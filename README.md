@@ -25,6 +25,9 @@ for NEAT Browser (WinUI 3 + WebView2). It loads a
 ```c
 NeatEngine* neat_engine_create(const char* dir, char** error_out);   // release dir -> engine
 void        neat_engine_free(NeatEngine*);
+NeatEngine* neat_engine_load(dir, cache_path, key, int32_t* from_cache_out, char** error_out);  // cache if valid, else lists
+int32_t     neat_engine_save(engine, path, key, char** error_out);               // write the engine cache
+int32_t neat_check_document(engine, url);                            // 1 = the page itself is blocked ($document / $all)
 
 int32_t neat_check_request(engine, url, source_url, request_type, method, NeatCheckResult*);
 void    neat_check_result_free(NeatCheckResult*);                    // action: allow / block / redirect
@@ -42,6 +45,16 @@ one engine, and a Rust panic never crosses the boundary (it becomes `NEAT_ERR_IN
 second engine, puts all other lists into the main engine, and applies the "trusted" permission to
 lists marked `trusted: true` (so only those can use trusted uBO scriptlets). **Verify the files'
 sha256 against the manifest before calling it**; the DLL does not.
+
+### Engine cache (0.2.0)
+
+Reading all the lists takes seconds on a slow machine. `neat_engine_save` writes the three engines'
+own serialized form to one file; `neat_engine_load` uses it when it was written for the same `key`
+(NEAT uses a hash of the release's manifest) by the same build of this library, and builds from the
+lists otherwise, so a missing, damaged, cut-short or foreign cache is never an error. adblock-rust
+checks its own format version and a checksum when it reads the data. Scriptlet resources are not
+part of the serialized engine and are read from the release folder each time. The file is about
+40 MB; loading it took 0.15 s against 0.76 s for the lists on a development machine.
 
 ## Build
 
@@ -89,3 +102,8 @@ python3 -I tests/smoke.py target/release/libneat_adblock.so ../neat-filters/dist
 
 Not covered by adblock-rust or this library: `$replace`, HTML filters (`##^`), `$urlskip`,
 `$ipaddress`, `$cname`. See neat-filters' README for the measured list.
+
+## License
+
+The Rust code here links adblock-rust (MPL-2.0). Pick a license for this repository yourself;
+none is set.

@@ -169,6 +169,71 @@ ts = [threading.Thread(target=worker) for _ in range(THREADS)]
 dt = time.time() - t0
 check(f"{THREADS} threads x {N} checks agree, no errors ({THREADS * N / dt:,.0f} checks/s incl. ctypes overhead)", not errors)
 
+# ---- engine cache ----
+import tempfile
+
+lib.neat_engine_load.restype = P
+lib.neat_engine_load.argtypes = [C.c_char_p, C.c_char_p, C.c_char_p, C.POINTER(C.c_int32), C.POINTER(P)]
+lib.neat_engine_save.restype = C.c_int32
+lib.neat_engine_save.argtypes = [P, C.c_char_p, C.c_char_p, C.POINTER(P)]
+
+with tempfile.TemporaryDirectory() as tmp:
+    cache = os.path.join(tmp, "sub", "engine.bin")  # the folder does not exist yet
+    check("saving the cache works and creates the folder", lib.neat_engine_save(engine, cache.encode(), b"k1", C.byref(err)) == 0 and os.path.getsize(cache) > 1000)
+    check("save with NULL engine gives NEAT_ERR_ARGS", lib.neat_engine_save(None, cache.encode(), b"k1", None) == -1)
+
+    fc = C.c_int32(0)
+    cached = lib.neat_engine_load(dist.encode(), cache.encode(), b"k1", C.byref(fc), C.byref(err))
+    check("a cache with the right key is used", bool(cached) and fc.value == 1)
+
+    probes = [
+        ("https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js", "script"),
+        ("https://www.googletagmanager.com/gtag/js?id=G-1", "script"),
+        ("https://securepubads.g.doubleclick.net/tag/js/gpt.js", "script"),
+        ("https://example.com/app.js", "script"),
+        ("https://ads.example.com/banner.gif", "image"),
+    ]
+    same = all(request(engine, u, "https://example.com/", ty)[:3] == request(cached, u, "https://example.com/", ty)[:3] for u, ty in probes)
+    check("a cached engine answers requests like a fresh one", same)
+    check("a cached engine answers page rules like a fresh one",
+          lib.neat_check_document(cached, b"https://csgo.xyz/") == lib.neat_check_document(engine, b"https://csgo.xyz/") == 1
+          and lib.neat_check_popup(cached, b"https://example.com/", b"https://example.org/") == lib.neat_check_popup(engine, b"https://example.com/", b"https://example.org/"))
+
+    def cos(e, u):
+        out = P()
+        lib.neat_cosmetic_resources(e, u.encode(), C.byref(out))
+        j = json.loads(take_string(out.value))
+        return {k: sorted(map(json.dumps, v)) if isinstance(v, list) else sorted(v.split("\n")) if isinstance(v, str) else v for k, v in j.items()}
+
+    check("a cached engine gives the same hiding rules and scriptlets",
+          all(cos(engine, u) == cos(cached, u) for u in ["https://www.youtube.com/", "https://www.reddit.com/", "https://example.com/"]))
+    lib.neat_engine_free(cached)
+
+    wrong = lib.neat_engine_load(dist.encode(), cache.encode(), b"k2", C.byref(fc), C.byref(err))
+    check("a cache for another key is not used, the lists are", bool(wrong) and fc.value == 0)
+    lib.neat_engine_free(wrong)
+
+    data = bytearray(open(cache, "rb").read())
+    data[len(data) // 2] ^= 0xFF
+    bad = os.path.join(tmp, "bad.bin")
+    open(bad, "wb").write(data)
+    e2 = lib.neat_engine_load(dist.encode(), bad.encode(), b"k1", C.byref(fc), C.byref(err))
+    check("a damaged cache is not used, the lists are", bool(e2) and fc.value == 0)
+    lib.neat_engine_free(e2)
+
+    open(bad, "wb").write(bytes(data[:3000]))
+    e3 = lib.neat_engine_load(dist.encode(), bad.encode(), b"k1", C.byref(fc), C.byref(err))
+    check("a cut-short cache is not used, the lists are", bool(e3) and fc.value == 0)
+    lib.neat_engine_free(e3)
+
+    e4 = lib.neat_engine_load(dist.encode(), os.path.join(tmp, "none.bin").encode(), b"k1", C.byref(fc), C.byref(err))
+    check("a missing cache is not an error", bool(e4) and fc.value == 0)
+    lib.neat_engine_free(e4)
+
+    e5 = lib.neat_engine_load(b"/nonexistent-dir", cache.encode(), b"k1", C.byref(fc), C.byref(err))
+    check("with no lists and no usable cache it fails cleanly", not e5)
+    take_string(err.value)
+
 lib.neat_engine_free(engine)
 lib.neat_engine_free(None)
 check("freeing NULL is a no-op", True)
